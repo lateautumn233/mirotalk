@@ -365,6 +365,7 @@ const videoQualitySelect = getId('videoQuality');
 const videoFpsSelect = getId('videoFps');
 const videoFpsDiv = getId('videoFpsDiv');
 const videoMaxBitrateInput = getId('videoMaxBitrate');
+const videoCodecPreference = getId('videoCodecPreference');
 const screenFpsSelect = getId('screenFps');
 const pushToTalkDiv = getId('pushToTalkDiv');
 const recImage = getId('recImage');
@@ -2652,6 +2653,16 @@ async function handleRtcOffer(peer_id) {
         pc.createOffer()
             .then((local_description) => {
                 console.log('Local offer description is', local_description);
+                // Prefer codec in SDP if configured
+                try {
+                    if (lsSettings && lsSettings.video_codec_preference) {
+                        const modifiedSdp = preferVideoCodec(local_description.sdp, lsSettings.video_codec_preference);
+                        local_description = new RTCSessionDescription({ type: local_description.type, sdp: modifiedSdp });
+                    }
+                } catch (e) {
+                    console.warn('preferVideoCodec failed on offer', e);
+                }
+
                 // https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection/setLocalDescription
                 pc.setLocalDescription(local_description)
                     .then(() => {
@@ -2696,6 +2707,16 @@ function handleSessionDescription(config) {
                 pc.createAnswer()
                     .then((local_description) => {
                         console.log('Answer description is: ', local_description);
+                        // Prefer codec in SDP if configured
+                        try {
+                            if (lsSettings && lsSettings.video_codec_preference) {
+                                const modifiedSdp = preferVideoCodec(local_description.sdp, lsSettings.video_codec_preference);
+                                local_description = new RTCSessionDescription({ type: local_description.type, sdp: modifiedSdp });
+                            }
+                        } catch (e) {
+                            console.warn('preferVideoCodec failed on answer', e);
+                        }
+
                         // https://developer.mozilla.org/en-US/docs/Web/API/RTCPeerConnection/setLocalDescription
                         pc.setLocalDescription(local_description)
                             .then(() => {
@@ -6741,6 +6762,16 @@ function setupMySettings() {
         });
     }
 
+    // Preferred video codec
+    if (videoCodecPreference) {
+        videoCodecPreference.value = lsSettings.video_codec_preference ? lsSettings.video_codec_preference : '';
+        videoCodecPreference.addEventListener('change', (e) => {
+            lsSettings.video_codec_preference = e.currentTarget.value;
+            lS.setSettings(lsSettings);
+            userLog('toast', `Preferred video codec set to ${e.currentTarget.value || 'Default'}`);
+        });
+    }
+
     // select screen fps
     screenFpsSelect.addEventListener('change', (e) => {
         screenMaxFrameRate = parseInt(screenFpsSelect.value, 10);
@@ -6851,6 +6882,63 @@ async function applyVideoMaxBitrateToSenders(kbps) {
             console.warn('applyVideoMaxBitrateToSenders failed', e);
         }
     }
+}
+
+/**
+ * Prefer a video codec by reordering m=video payloads so that the selected codec payloads come first
+ * @param {string} sdp
+ * @param {string} preferredCodec (hevc|av1|h264|vp9|vp8)
+ * @returns {string}
+ */
+function preferVideoCodec(sdp, preferredCodec) {
+    if (!sdp || !preferredCodec) return sdp;
+    const pref = preferredCodec.toLowerCase();
+    // parse rtpmap to find payload types per codec name
+    const lines = sdp.split(/\r?\n/);
+    const rtpmap = {};
+    for (const line of lines) {
+        const m = line.match(/^a=rtpmap:(\d+)\s+([^\/\s]+)/i);
+        if (m) {
+            const payload = m[1];
+            const codec = m[2].toLowerCase();
+            if (!rtpmap[codec]) rtpmap[codec] = [];
+            rtpmap[codec].push(payload);
+        }
+    }
+
+    // Map known aliases
+    const aliasMap = {
+        av1: ['av1', 'av1x'],
+        h264: ['h264', 'h264/'],
+        vp9: ['vp9'],
+        vp8: ['vp8'],
+        hevc: ['hevc', 'h265', 'evc']
+    };
+
+    let targetPayloads = [];
+    const aliases = aliasMap[pref] || [pref];
+    for (const a of aliases) {
+        if (rtpmap[a]) targetPayloads = targetPayloads.concat(rtpmap[a]);
+    }
+
+    if (targetPayloads.length === 0) return sdp; // nothing to do
+
+    // Find m=video line and reorder its payload list
+    const out = [];
+    for (const line of lines) {
+        if (line.startsWith('m=video')) {
+            const parts = line.split(' ');
+            // parts: ['m=video', port, proto, payload1, payload2, ...]
+            const header = parts.slice(0, 3);
+            const payloads = parts.slice(3);
+            const remaining = payloads.filter((p) => !targetPayloads.includes(p));
+            const newPayloads = targetPayloads.filter((p) => payloads.includes(p)).concat(remaining);
+            out.push(header.concat(newPayloads).join(' '));
+        } else {
+            out.push(line);
+        }
+    }
+    return out.join('\r\n');
 }
 
 /**
