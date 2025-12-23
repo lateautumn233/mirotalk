@@ -364,6 +364,7 @@ const videoSelect = getId('videoSource');
 const videoQualitySelect = getId('videoQuality');
 const videoFpsSelect = getId('videoFps');
 const videoFpsDiv = getId('videoFpsDiv');
+const videoMaxBitrateInput = getId('videoMaxBitrate');
 const screenFpsSelect = getId('screenFps');
 const pushToTalkDiv = getId('pushToTalkDiv');
 const recImage = getId('recImage');
@@ -6727,6 +6728,19 @@ function setupMySettings() {
         lsSettings.video_fps = e.currentTarget.selectedIndex;
         lS.setSettings(lsSettings);
     });
+
+    // Max video bitrate (kbps)
+    if (videoMaxBitrateInput) {
+        videoMaxBitrateInput.value = lsSettings.video_max_bitrate ? lsSettings.video_max_bitrate : '';
+        videoMaxBitrateInput.addEventListener('change', async (e) => {
+            const kbps = parseInt(e.currentTarget.value, 10) || 0;
+            lsSettings.video_max_bitrate = kbps;
+            lS.setSettings(lsSettings);
+            await applyVideoMaxBitrateToSenders(kbps);
+            userLog('toast', `Max video bitrate set to ${kbps} kbps`);
+        });
+    }
+
     // select screen fps
     screenFpsSelect.addEventListener('change', (e) => {
         screenMaxFrameRate = parseInt(screenFpsSelect.value, 10);
@@ -6811,6 +6825,32 @@ function setupMySettings() {
     unlockRoomBtn.addEventListener('click', (e) => {
         handleRoomAction({ action: 'unlock' }, true);
     });
+}
+
+/**
+ * Apply max bitrate to video RTCRtpSenders
+ * @param {number} kbps
+ */
+async function applyVideoMaxBitrateToSenders(kbps) {
+    const bps = kbps && kbps > 0 ? kbps * 1000 : null;
+    for (const peer_id in peerConnections) {
+        try {
+            const pc = peerConnections[peer_id];
+            const senders = pc.getSenders();
+            const videoSenders = senders.filter((s) => s.track && s.track.kind === 'video');
+            if (videoSenders.length >= 1) {
+                const sender = videoSenders[0];
+                const params = sender.getParameters();
+                if (!params.encodings || params.encodings.length === 0) params.encodings = [{}];
+                if (bps) params.encodings[0].maxBitrate = bps;
+                else delete params.encodings[0].maxBitrate;
+                await sender.setParameters(params);
+                console.log('APPLIED MAX BITRATE', { peer_id, kbps });
+            }
+        } catch (e) {
+            console.warn('applyVideoMaxBitrateToSenders failed', e);
+        }
+    }
 }
 
 /**
@@ -8221,6 +8261,11 @@ async function refreshMyStreamToPeers(stream, localAudioTrackChange = false) {
                 console.log('ADD AUDIO TRACK TO', { peer_id, peer_name, audioTrack });
             }
         }
+    }
+
+    // Apply saved max bitrate (kbps) to video senders if configured
+    if (lsSettings && lsSettings.video_max_bitrate) {
+        await applyVideoMaxBitrateToSenders(lsSettings.video_max_bitrate);
     }
 }
 
